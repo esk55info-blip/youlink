@@ -22,10 +22,24 @@ http.createServer((req, res) => {
 let lastSearchResults = [];
 const sentByBot = new Set();
 
+const YTDLP_COMMON_ARGS = [
+  '--no-warnings',
+  '--no-playlist',
+  '--js-runtimes', 'node',
+  '--extractor-args', 'youtube:player_client=android_vr,ios,web'
+];
+
 function runYtDlp(args) {
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', args, { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(stderr || err.message));
+    execFile('yt-dlp', [...YTDLP_COMMON_ARGS, ...args], { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
+      if (err) {
+        const cleanErr = (stderr || err.message || '')
+          .split('\n')
+          .filter((l) => !l.startsWith('WARNING:'))
+          .join('\n')
+          .trim();
+        return reject(new Error(cleanErr || err.message));
+      }
       resolve(stdout);
     });
   });
@@ -91,7 +105,6 @@ async function startBot() {
     const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] + '@lid' : '';
     const remoteJid = msg.key.remoteJid || '';
 
-    // يدعم مراسلة نفسك سواء بالرقم أو بالمعرّف الجديد (@lid)
     const isSelfChat =
       remoteJid === myJid ||
       (myLid && remoteJid === myLid) ||
@@ -122,20 +135,18 @@ async function startBot() {
 
         if (mode === 'audio') {
           outFile = `/tmp/audio_${id}.mp3`;
-          await runYtDlp(['-x', '--audio-format', 'mp3', '--no-playlist', '-o', outFile, url]);
+          await runYtDlp(['-x', '--audio-format', 'mp3', '-o', outFile, url]);
           await reply({
             document: fs.readFileSync(outFile),
             mimetype: 'audio/mpeg',
-            fileName: `${customTitle || 'audio'}.mp3`
+            fileName: `${(customTitle || 'audio').replace(/[\\/:*?"<>|]/g, '_')}.mp3`
           });
         } else {
           outFile = `/tmp/video_${id}.mp4`;
           const maxH = mode === 'hd' ? '720' : '480';
-          const formatStr = `bestvideo[height<=${maxH}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=${maxH}][ext=mp4]/best[ext=mp4]/best`;
           await runYtDlp([
-            '-f', formatStr,
+            '-S', `res:${maxH},vcodec:h264,ext:mp4:m4a`,
             '--merge-output-format', 'mp4',
-            '--no-playlist',
             '-o', outFile,
             url
           ]);
@@ -158,7 +169,7 @@ async function startBot() {
           }
         }
       } catch (err) {
-        await reply({ text: `❌ خطأ أثناء التحميل:\n${err.message.slice(0, 300)}` });
+        await reply({ text: `❌ خطأ أثناء التحميل:\n${err.message.slice(0, 350)}` });
       } finally {
         cleanup(outFile);
       }
@@ -203,7 +214,7 @@ async function startBot() {
       return;
     }
 
-    // 3. جلب آخر فيديو مباشرة إذا ذُكرت عبارة "اخر فيديو" أو "الفيديو الاخير"
+    // 3. جلب آخر فيديو مباشرة
     if (/^(اخر|آخر)\s+فيديو\s+/i.test(text) || /الفيديو\s+(الاخير|الأخير)/i.test(text)) {
       const query = text
         .replace(/^(اخر|آخر)\s+فيديو\s+/i, '')
@@ -215,14 +226,13 @@ async function startBot() {
         const raw = await runYtDlp([
           `ytsearch1:${query}`,
           '--dump-json',
-          '--flat-playlist',
-          '--no-warnings'
+          '--flat-playlist'
         ]);
         const item = JSON.parse(raw.trim().split('\n')[0]);
         const videoUrl = item.url || `https://www.youtube.com/watch?v=${item.id}`;
         await sendMedia(videoUrl, 'video', item.title);
       } catch (err) {
-        await reply({ text: `❌ تعذر جلب الفيديو: ${err.message.slice(0, 200)}` });
+        await reply({ text: `❌ تعذر جلب الفيديو: ${err.message.slice(0, 250)}` });
       }
       return;
     }
@@ -234,8 +244,7 @@ async function startBot() {
       const raw = await runYtDlp([
         `ytsearch5:${query}`,
         '--dump-json',
-        '--flat-playlist',
-        '--no-warnings'
+        '--flat-playlist'
       ]);
       lastSearchResults = raw
         .trim()
@@ -260,7 +269,7 @@ async function startBot() {
         text: `${listText}\n\n💡 أرسل رقم الفيديو (مثلاً *1*) للمشاهدة، أو (*1 عالية*) لدقة 720p، أو (*1 صوت*) للتحميل MP3.`
       });
     } catch (err) {
-      await reply({ text: `❌ فشل البحث: ${err.message.slice(0, 200)}` });
+      await reply({ text: `❌ فشل البحث: ${err.message.slice(0, 250)}` });
     }
   });
 }
