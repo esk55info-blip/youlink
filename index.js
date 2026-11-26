@@ -13,7 +13,6 @@ const { execFile } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { Readable } = require('stream');
 
-// سيرفر بسيط لإبقاء الاستضافة نشطة
 const PORT = process.env.PORT || 7860;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -57,14 +56,13 @@ async function startBot() {
     syncFullHistory: false
   });
 
-  // طلب كود الربط بالرقم إذا لم يكن مسجلاً
   if (!sock.authState.creds.registered && process.env.PHONE_NUMBER) {
     setTimeout(async () => {
       try {
         const cleanNum = process.env.PHONE_NUMBER.replace(/[^0-9]/g, '');
         const code = await sock.requestPairingCode(cleanNum);
         console.log('\n=========================================');
-        console.log('كود ربط واتساب الخاص بك:', code);
+        console.log('PAIRING CODE:', code);
         console.log('=========================================\n');
       } catch (e) {
         console.error('Pairing error:', e.message);
@@ -90,10 +88,16 @@ async function startBot() {
     if (sentByBot.has(msg.key.id)) return;
 
     const myJid = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
-    const remoteJid = msg.key.remoteJid;
+    const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] + '@lid' : '';
+    const remoteJid = msg.key.remoteJid || '';
 
-    // يستجيب لمحادثتك مع نفسك فقط للأمان
-    if (remoteJid !== myJid) return;
+    // يدعم مراسلة نفسك سواء بالرقم أو بالمعرّف الجديد (@lid)
+    const isSelfChat =
+      remoteJid === myJid ||
+      (myLid && remoteJid === myLid) ||
+      (msg.key.fromMe && remoteJid.endsWith('@lid'));
+
+    if (!isSelfChat) return;
 
     const text = (
       msg.message.conversation ||
@@ -102,6 +106,7 @@ async function startBot() {
     ).trim();
 
     if (!text) return;
+    if (/^(⏳|🔍|🔎|📥|✅|❌|\*1\.\*|رقم غير موجود|لم يتم العثور)/.test(text)) return;
 
     const reply = async (content) => {
       const sent = await sock.sendMessage(remoteJid, content);
@@ -159,64 +164,7 @@ async function startBot() {
       }
     };
 
-    // 1. أمر البحث في يوتيوب
-    if (text.startsWith('بحث ')) {
-      const query = text.replace(/^بحث\s+/, '').trim();
-      await reply({ text: `🔍 جاري البحث في يوتيوب عن: "${query}"...` });
-      try {
-        const raw = await runYtDlp([
-          `ytsearch5:${query}`,
-          '--dump-json',
-          '--flat-playlist',
-          '--no-warnings'
-        ]);
-        lastSearchResults = raw
-          .trim()
-          .split('\n')
-          .map((line) => JSON.parse(line))
-          .slice(0, 5);
-
-        if (!lastSearchResults.length) {
-          return reply({ text: 'لم يتم العثور على نتائج.' });
-        }
-
-        const listText = lastSearchResults
-          .map((v, i) => {
-            const mins = v.duration ? `${Math.floor(v.duration / 60)}:${String(v.duration % 60).padStart(2, '0')}` : 'غير محدد';
-            return `*${i + 1}.* ${v.title}\n   📺 ${v.uploader || ''} | ⏱ ${mins}`;
-          })
-          .join('\n\n');
-
-        await reply({
-          text: `${listText}\n\n💡 أرسل رقم الفيديو (مثلاً *1*) للمشاهدة، أو (*1 عالية*) لدقة 720p، أو (*1 صوت*) للتحميل MP3.`
-        });
-      } catch (err) {
-        await reply({ text: `❌ فشل البحث: ${err.message.slice(0, 200)}` });
-      }
-      return;
-    }
-
-    // 2. أمر جلب آخر فيديو مباشرة بالاسم
-    if (text.startsWith('اخر فيديو ') || text.startsWith('آخر فيديو ')) {
-      const query = text.replace(/^(اخر|آخر)\s+فيديو\s+/, '').trim();
-      await reply({ text: `🔎 جاري جلب أحدث فيديو لـ: "${query}"...` });
-      try {
-        const raw = await runYtDlp([
-          `ytsearch1:${query}`,
-          '--dump-json',
-          '--flat-playlist',
-          '--no-warnings'
-        ]);
-        const item = JSON.parse(raw.trim().split('\n')[0]);
-        const videoUrl = item.url || `https://www.youtube.com/watch?v=${item.id}`;
-        await sendMedia(videoUrl, 'video', item.title);
-      } catch (err) {
-        await reply({ text: `❌ تعذر جلب الفيديو: ${err.message.slice(0, 200)}` });
-      }
-      return;
-    }
-
-    // 3. اختيار رقم من نتائج البحث
+    // 1. اختيار رقم من نتائج البحث
     const pickMatch = text.match(/^([1-5])(\s+(صوت|عالية|720))?$/);
     if (pickMatch && lastSearchResults.length > 0) {
       const idx = parseInt(pickMatch[1], 10) - 1;
@@ -229,7 +177,7 @@ async function startBot() {
       return;
     }
 
-    // 4. أي رابط مباشر (يوتيوب، تيك توك، إنستغرام، أو رابط ملف مباشر)
+    // 2. أي رابط مباشر
     if (text.startsWith('http://') || text.startsWith('https://')) {
       const url = text.split(/\s+/)[0];
       const isDirectFile = /\.(zip|rar|7z|apk|ipa|pdf|exe|dmg|iso|mp3)(\?.*)?$/i.test(url);
@@ -252,6 +200,67 @@ async function startBot() {
       } else {
         await sendMedia(url, 'video');
       }
+      return;
+    }
+
+    // 3. جلب آخر فيديو مباشرة إذا ذُكرت عبارة "اخر فيديو" أو "الفيديو الاخير"
+    if (/^(اخر|آخر)\s+فيديو\s+/i.test(text) || /الفيديو\s+(الاخير|الأخير)/i.test(text)) {
+      const query = text
+        .replace(/^(اخر|آخر)\s+فيديو\s+/i, '')
+        .replace(/الفيديو\s+(الاخير|الأخير)/i, '')
+        .trim();
+      if (!query) return;
+      await reply({ text: `🔎 جاري جلب أحدث فيديو لـ: "${query}"...` });
+      try {
+        const raw = await runYtDlp([
+          `ytsearch1:${query}`,
+          '--dump-json',
+          '--flat-playlist',
+          '--no-warnings'
+        ]);
+        const item = JSON.parse(raw.trim().split('\n')[0]);
+        const videoUrl = item.url || `https://www.youtube.com/watch?v=${item.id}`;
+        await sendMedia(videoUrl, 'video', item.title);
+      } catch (err) {
+        await reply({ text: `❌ تعذر جلب الفيديو: ${err.message.slice(0, 200)}` });
+      }
+      return;
+    }
+
+    // 4. أي نص آخر يُعتبر بحثاً مباشراً في يوتيوب تلقائياً
+    const query = text.replace(/^بحث\s+/, '').trim();
+    await reply({ text: `🔍 جاري البحث في يوتيوب عن: "${query}"...` });
+    try {
+      const raw = await runYtDlp([
+        `ytsearch5:${query}`,
+        '--dump-json',
+        '--flat-playlist',
+        '--no-warnings'
+      ]);
+      lastSearchResults = raw
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .slice(0, 5);
+
+      if (!lastSearchResults.length) {
+        return reply({ text: 'لم يتم العثور على نتائج.' });
+      }
+
+      const listText = lastSearchResults
+        .map((v, i) => {
+          const mins = v.duration
+            ? `${Math.floor(v.duration / 60)}:${String(v.duration % 60).padStart(2, '0')}`
+            : 'غير محدد';
+          return `*${i + 1}.* ${v.title}\n   📺 ${v.uploader || ''} | ⏱ ${mins}`;
+        })
+        .join('\n\n');
+
+      await reply({
+        text: `${listText}\n\n💡 أرسل رقم الفيديو (مثلاً *1*) للمشاهدة، أو (*1 عالية*) لدقة 720p، أو (*1 صوت*) للتحميل MP3.`
+      });
+    } catch (err) {
+      await reply({ text: `❌ فشل البحث: ${err.message.slice(0, 200)}` });
     }
   });
 }
