@@ -25,6 +25,7 @@ const sentByBot = new Set();
 const YTDLP_COMMON_ARGS = [
   '--no-warnings',
   '--no-playlist',
+  '--concurrent-fragments', '4',
   '--js-runtimes', 'node',
   ...(fs.existsSync('/tmp/cookies.txt') ? ['--cookies', '/tmp/cookies.txt'] : [])
 ];
@@ -56,6 +57,15 @@ function cleanup(filePath) {
   if (filePath && fs.existsSync(filePath)) {
     try { fs.unlinkSync(filePath); } catch (_) {}
   }
+}
+
+function parseQualityMode(mod) {
+  const m = (mod || '').trim().toLowerCase();
+  if (m === 'صوت') return 'audio';
+  if (m === '360') return '360';
+  if (m === '720' || m === 'عالية') return '720';
+  if (m === '1080' || m === 'فول') return '1080';
+  return '480';
 }
 
 async function startBot() {
@@ -115,7 +125,6 @@ async function startBot() {
     const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].split('@')[0];
     const remoteId = remoteJid.split(':')[0].split('@')[0];
 
-    // العمل حصراً في محادثة مراسلة نفسك دون التدخل في محادثات الآخرين
     const isSelfChat =
       (myNum && remoteId === myNum) ||
       (myLid && remoteId === myLid);
@@ -137,25 +146,27 @@ async function startBot() {
       return sent;
     };
 
-    const sendMedia = async (url, mode = 'video', customTitle = '') => {
+    const sendMedia = async (url, mode = '480', customTitle = '') => {
       const id = Date.now();
       let outFile = '';
       try {
-        await reply({ text: '⏳ جاري التحميل من السيرفر، انتظر قليلاً...' });
+        const label = mode === 'audio' ? 'صوت MP3' : `دقة ${mode}p`;
+        await reply({ text: `⏳ جاري التحميل (${label})، انتظر قليلاً...` });
 
         if (mode === 'audio') {
           outFile = `/tmp/audio_${id}.mp3`;
           await runYtDlp(['-x', '--audio-format', 'mp3', '-o', outFile, url]);
           await reply({
-            document: fs.readFileSync(outFile),
+            document: { url: outFile },
             mimetype: 'audio/mpeg',
             fileName: `${(customTitle || 'audio').replace(/[\\/:*?"<>|]/g, '_')}.mp3`
           });
         } else {
           outFile = `/tmp/video_${id}.mp4`;
-          const maxH = mode === 'hd' ? '720' : '480';
+          const maxH = mode;
           const formatSelector =
             `bv*[height<=${maxH}][vcodec^=avc1]+ba[acodec^=mp4a]/` +
+            `bv*[height<=${maxH}][ext=mp4]+ba[ext=m4a]/` +
             `bv*[height<=${maxH}]+ba/` +
             `b[height<=${maxH}]/` +
             `bv*+ba/b`;
@@ -163,6 +174,8 @@ async function startBot() {
           await runYtDlp([
             '-f', formatSelector,
             '--merge-output-format', 'mp4',
+            '--remux-video', 'mp4',
+            '--postprocessor-args', 'ffmpeg:-movflags +faststart',
             '-o', outFile,
             url
           ]);
@@ -170,17 +183,18 @@ async function startBot() {
           const sizeMB = fs.statSync(outFile).size / (1024 * 1024);
           const fileName = `${(customTitle || 'video').replace(/[\\/:*?"<>|]/g, '_')}.mp4`;
 
-          if (sizeMB < 65 && mode !== 'hd') {
+          // إرسال كفيديو مباشر قابل للتشغيل أثناء التحميل إذا كان أقل من 95 MB
+          if (sizeMB < 95) {
             await reply({
-              video: fs.readFileSync(outFile),
-              caption: `✅ ${customTitle || 'تم التحميل'} (${sizeMB.toFixed(1)} MB)`
+              video: { url: outFile },
+              caption: `✅ ${customTitle || 'تم التحميل'} [${maxH}p] (${sizeMB.toFixed(1)} MB)`
             });
           } else {
             await reply({
-              document: fs.readFileSync(outFile),
+              document: { url: outFile },
               mimetype: 'video/mp4',
               fileName,
-              caption: `✅ ${customTitle || 'تم التحميل'} (${sizeMB.toFixed(1)} MB)`
+              caption: `✅ ${customTitle || 'تم التحميل'} [${maxH}p] (${sizeMB.toFixed(1)} MB)\n📦 أُرسل كملف لأن حجمه يتجاوز 95 MB.`
             });
           }
         }
@@ -191,22 +205,22 @@ async function startBot() {
       }
     };
 
-    // 1. اختيار رقم من نتائج البحث
-    const pickMatch = text.match(/^([1-5])(\s+(صوت|عالية|720))?$/);
+    // 1. اختيار رقم من نتائج البحث مع الدقة أو الصوت
+    const pickMatch = text.match(/^([1-5])(?:\s+(360|480|720|1080|صوت|عالية|فول))?$/i);
     if (pickMatch && lastSearchResults.length > 0) {
       const idx = parseInt(pickMatch[1], 10) - 1;
       const item = lastSearchResults[idx];
       if (!item) return reply({ text: 'رقم غير موجود في القائمة.' });
-      const modifier = pickMatch[3] || '';
-      const mode = modifier === 'صوت' ? 'audio' : modifier ? 'hd' : 'video';
+      const mode = parseQualityMode(pickMatch[2]);
       const videoUrl = item.url || `https://www.youtube.com/watch?v=${item.id}`;
       await sendMedia(videoUrl, mode, item.title);
       return;
     }
 
-    // 2. أي رابط مباشر
+    // 2. أي رابط مباشر (يدعم إضافة الدقة بجانب الرابط مثل: رابط 1080 أو رابط صوت)
     if (text.startsWith('http://') || text.startsWith('https://')) {
-      const url = text.split(/\s+/)[0];
+      const parts = text.split(/\s+/);
+      const url = parts[0];
       const isDirectFile = /\.(zip|rar|7z|apk|ipa|pdf|exe|dmg|iso|mp3)(\?.*)?$/i.test(url);
 
       if (isDirectFile) {
@@ -215,7 +229,7 @@ async function startBot() {
           await reply({ text: '📥 جاري سحب الملف المباشر...' });
           await downloadDirectFile(url, tempFile);
           await reply({
-            document: fs.readFileSync(tempFile),
+            document: { url: tempFile },
             mimetype: 'application/octet-stream',
             fileName: path.basename(tempFile).replace(/^file_\d+_/, '')
           });
@@ -225,7 +239,8 @@ async function startBot() {
           cleanup(tempFile);
         }
       } else {
-        await sendMedia(url, 'video');
+        const mode = parseQualityMode(parts[1]);
+        await sendMedia(url, mode);
       }
       return;
     }
@@ -246,14 +261,14 @@ async function startBot() {
         ]);
         const item = JSON.parse(raw.trim().split('\n')[0]);
         const videoUrl = item.url || `https://www.youtube.com/watch?v=${item.id}`;
-        await sendMedia(videoUrl, 'video', item.title);
+        await sendMedia(videoUrl, '480', item.title);
       } catch (err) {
         await reply({ text: `❌ تعذر جلب الفيديو: ${err.message.slice(0, 250)}` });
       }
       return;
     }
 
-    // 4. أي نص آخر في محادثتك مع نفسك يُعتبر بحثاً مباشراً في يوتيوب
+    // 4. البحث في يوتيوب
     const query = text.replace(/^بحث\s+/, '').trim();
     await reply({ text: `🔍 جاري البحث في يوتيوب عن: "${query}"...` });
     try {
@@ -282,7 +297,14 @@ async function startBot() {
         .join('\n\n');
 
       await reply({
-        text: `${listText}\n\n💡 أرسل رقم الفيديو (مثلاً *1*) للمشاهدة، أو (*1 عالية*) لدقة 720p، أو (*1 صوت*) للتحميل MP3.`
+        text:
+          `${listText}\n\n` +
+          `💡 أرسل رقم الفيديو مع الدقة المطلوبة:\n` +
+          `• *1* (دقة 480p افتراضية)\n` +
+          `• *1 360* (توفير بيانات)\n` +
+          `• *1 720* (جودة HD)\n` +
+          `• *1 1080* (جودة Full HD)\n` +
+          `• *1 صوت* (ملف MP3)`
       });
     } catch (err) {
       await reply({ text: `❌ فشل البحث: ${err.message.slice(0, 250)}` });
