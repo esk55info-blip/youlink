@@ -100,15 +100,25 @@ async function startBot() {
     const msg = messages[0];
     if (!msg?.message) return;
     if (sentByBot.has(msg.key.id)) return;
+    if (!msg.key.fromMe) return;
 
-    const myJid = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
-    const myLid = sock.user?.lid ? sock.user.lid.split(':')[0] + '@lid' : '';
     const remoteJid = msg.key.remoteJid || '';
+    if (
+      remoteJid.endsWith('@g.us') ||
+      remoteJid.endsWith('@broadcast') ||
+      remoteJid.endsWith('@newsletter')
+    ) {
+      return;
+    }
 
+    const myNum = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].split('@')[0];
+    const myLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].split('@')[0];
+    const remoteId = remoteJid.split(':')[0].split('@')[0];
+
+    // العمل حصراً في محادثة مراسلة نفسك دون التدخل في محادثات الآخرين
     const isSelfChat =
-      remoteJid === myJid ||
-      (myLid && remoteJid === myLid) ||
-      (msg.key.fromMe && remoteJid.endsWith('@lid'));
+      (myNum && remoteId === myNum) ||
+      (myLid && remoteId === myLid);
 
     if (!isSelfChat) return;
 
@@ -144,8 +154,14 @@ async function startBot() {
         } else {
           outFile = `/tmp/video_${id}.mp4`;
           const maxH = mode === 'hd' ? '720' : '480';
+          const formatSelector =
+            `bv*[height<=${maxH}][vcodec^=avc1]+ba[acodec^=mp4a]/` +
+            `bv*[height<=${maxH}]+ba/` +
+            `b[height<=${maxH}]/` +
+            `bv*+ba/b`;
+
           await runYtDlp([
-            '-S', `res:${maxH},vcodec:h264,ext:mp4:m4a`,
+            '-f', formatSelector,
             '--merge-output-format', 'mp4',
             '-o', outFile,
             url
@@ -154,7 +170,7 @@ async function startBot() {
           const sizeMB = fs.statSync(outFile).size / (1024 * 1024);
           const fileName = `${(customTitle || 'video').replace(/[\\/:*?"<>|]/g, '_')}.mp4`;
 
-          if (sizeMB < 75 && mode !== 'hd') {
+          if (sizeMB < 65 && mode !== 'hd') {
             await reply({
               video: fs.readFileSync(outFile),
               caption: `✅ ${customTitle || 'تم التحميل'} (${sizeMB.toFixed(1)} MB)`
@@ -237,7 +253,7 @@ async function startBot() {
       return;
     }
 
-    // 4. أي نص آخر يُعتبر بحثاً مباشراً في يوتيوب تلقائياً
+    // 4. أي نص آخر في محادثتك مع نفسك يُعتبر بحثاً مباشراً في يوتيوب
     const query = text.replace(/^بحث\s+/, '').trim();
     await reply({ text: `🔍 جاري البحث في يوتيوب عن: "${query}"...` });
     try {
