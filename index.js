@@ -26,7 +26,7 @@ const YTDLP_COMMON_ARGS = [
   '--no-warnings',
   '--no-playlist',
   '--js-runtimes', 'node',
-  '--extractor-args', 'youtube:player_client=android_vr,ios,web'
+  ...(fs.existsSync('/tmp/cookies.txt') ? ['--cookies', '/tmp/cookies.txt'] : [])
 ];
 
 function runYtDlp(args) {
