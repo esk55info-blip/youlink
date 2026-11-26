@@ -48,8 +48,12 @@ jobs:
         env:
           PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
           SESSION_KEY: ${{ secrets.SESSION_KEY }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ -n "$YT_COOKIES" ]; then
+            printf "%s\n" "$YT_COOKIES" > /tmp/cookies.txt
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -60,9 +64,10 @@ jobs:
                 tar -czf auth.tar.gz /app/auth
                 openssl enc -aes-256-cbc -salt -pbkdf2 -in auth.tar.gz -out auth.enc -pass env:SESSION_KEY
                 rm -f auth.tar.gz
-                git pull --rebase || true
+                git checkout -- package.json package-lock.json 2>/dev/null || true
                 git add auth.enc
-                git commit -m "Save initial WhatsApp session" || true
+                git diff --cached --quiet || git commit -m "Save initial WhatsApp session"
+                git pull --rebase || true
                 git push || true
                 touch /tmp/initial_saved
               fi
@@ -77,9 +82,10 @@ jobs:
             tar -czf auth.tar.gz /app/auth
             openssl enc -aes-256-cbc -salt -pbkdf2 -in auth.tar.gz -out auth.enc -pass env:SESSION_KEY
             rm -f auth.tar.gz
-            git pull --rebase || true
+            git checkout -- package.json package-lock.json 2>/dev/null || true
             git add auth.enc
-            git commit -m "Update WhatsApp session" || true
+            git diff --cached --quiet || git commit -m "Update WhatsApp session"
+            git pull --rebase || true
             git push || true
           fi
 
